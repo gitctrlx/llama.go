@@ -24,7 +24,7 @@ func LoadTokenizer(path string, vocabSize int) ([]string, []float32, uint32, err
 
 	vocab := make([]string, vocabSize)
 	scores := make([]float32, vocabSize)
-	for i := 0; i < vocabSize; i++ {
+	for i := range vocabSize {
 		var score float32
 		if err := binary.Read(f, binary.LittleEndian, &score); err != nil {
 			return nil, nil, 0, fmt.Errorf("failed to read score for index %d: %w", i, err)
