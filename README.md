@@ -1,2 +1,3 @@
 # llama.go
-Llama 2 inference in one file of pure Go.
+
+Llama inference in one file of pure Go.
