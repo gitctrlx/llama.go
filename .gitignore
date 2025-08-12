@@ -32,3 +32,5 @@ go.work.sum
 # .vscode/
 
 stories15M.bin
+stories45M.bin
+stories110M.bin
