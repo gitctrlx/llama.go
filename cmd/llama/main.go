@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/qntx/llama2.go"
+	"github.com/qntx/llama.go"
 	"github.com/spf13/cobra"
 )
 
@@ -24,9 +24,9 @@ type AppConfig struct {
 // Runner encapsulates all the components and state required to run the model.
 // It bundles the model's parts together for easier management.
 type Runner struct {
-	config         *llama2.Config
-	weights        *llama2.TransformerWeights
-	state          *llama2.RunState
+	config         *llama.Config
+	weights        *llama.TransformerWeights
+	state          *llama.RunState
 	rng            *rand.Rand
 	vocab          []string
 	vocabMap       map[string]int32
@@ -38,8 +38,8 @@ func main() {
 	var cfg AppConfig
 
 	rootCmd := &cobra.Command{
-		Use:   "llama2 <checkpoint>",
-		Short: "Run a Llama2 model",
+		Use:   "llama <checkpoint>",
+		Short: "Run a llama model",
 		Args:  cobra.ExactArgs(1), // Use checkpoint as a positional argument.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg.CheckpointPath = args[0]
@@ -76,13 +76,13 @@ func setup(cfg *AppConfig) (*Runner, error) {
 	fmt.Println("⏳ Initializing model...")
 
 	// Load model config and weights.
-	config, weights, err := llama2.LoadCheckpoint(cfg.CheckpointPath)
+	config, weights, err := llama.LoadCheckpoint(cfg.CheckpointPath)
 	if err != nil {
 		return nil, fmt.Errorf("could not load checkpoint: %w", err)
 	}
 
 	// Load the tokenizer.
-	vocab, vocabScores, maxTokenLength, err := llama2.LoadTokenizer(cfg.TokenizerPath)
+	vocab, vocabScores, maxTokenLength, err := llama.LoadTokenizer(cfg.TokenizerPath, int(config.VocabSize))
 	if err != nil {
 		return nil, fmt.Errorf("could not load tokenizer: %w", err)
 	}
@@ -95,7 +95,7 @@ func setup(cfg *AppConfig) (*Runner, error) {
 	runner := &Runner{
 		config:         config,
 		weights:        weights,
-		state:          llama2.NewRunState(config),
+		state:          llama.NewRunState(config),
 		rng:            rand.New(rand.NewSource(cfg.Seed)),
 		vocab:          vocab,
 		vocabMap:       vocabMap,
@@ -115,45 +115,54 @@ func run(r *Runner, cfg *AppConfig) error {
 		steps = r.config.SeqLen
 	}
 
-	// Encode the prompt into tokens.
-	promptTokens, err := llama2.BPEEncode(cfg.Prompt, r.vocab, r.vocabScores, r.vocabMap, r.maxTokenLength)
+	// 1. Encode the prompt using the new, aligned BPEEncode function.
+	// We want to prepend the BOS token (true) but not append an EOS token (false).
+	promptTokens, err := llama.BPEEncode(cfg.Prompt, r.vocab, r.vocabScores, r.vocabMap, true, false)
 	if err != nil {
 		return fmt.Errorf("could not encode prompt: %w", err)
 	}
+	if len(promptTokens) < 1 {
+		return fmt.Errorf("something is wrong, expected at least 1 prompt token")
+	}
 
 	fmt.Println("--- Generation Start ---")
-	fmt.Print("<s>") // Print the initial BOS token for stylistic reasons.
 
+	// 2. Start the generation loop.
 	var start time.Time
-	token := int32(1) // Start with the BOS (Beginning Of Sequence) token.
+	// The first token is the one from our encoded prompt (which is BOS).
+	token := promptTokens[0]
 	pos := int32(0)
 
 	for pos < steps {
 		// Run one forward pass of the transformer.
-		llama2.Transformer(token, pos, r.config, r.state, r.weights)
+		llama.Transformer(token, pos, r.config, r.state, r.weights)
 
 		var next int32
-		if pos < int32(len(promptTokens)) {
-			// If we are still processing the prompt, force the next token.
-			next = promptTokens[pos]
+		if pos < int32(len(promptTokens)-1) {
+			// If we are still processing the prompt, force the next token to be the next prompt token.
+			// This is called "prompt processing".
+			next = promptTokens[pos+1]
 		} else {
-			// Otherwise, sample from the model's output distribution.
-			next = llama2.Sample(r.state.Logits, cfg.Temperature, r.rng)
+			// Otherwise, we are in "generation" mode: sample from the model's output distribution.
+			next = llama.Sample(r.state.Logits, cfg.Temperature, r.rng)
 		}
 
-		// Special handling for the space after the first token.
+		// Print the token, handling special cases.
+		// NOTE: A proper `decode` function like in C would be better here.
 		tokenStr := r.vocab[next]
 		if token == 1 && len(tokenStr) > 0 && tokenStr[0] == ' ' {
+			// The C code's `decode` function strips the leading space from the first token if it's a BOS.
 			tokenStr = tokenStr[1:]
 		}
 		fmt.Print(tokenStr)
 		os.Stdout.Sync() // Flush stdout for a streaming effect.
 
+		// Advance to the next token.
 		token = next
 		pos++
 
-		// Start the timer after the first token is generated.
-		if start.IsZero() {
+		// Start the timer after the prompt is fully processed and generation begins.
+		if start.IsZero() && pos >= int32(len(promptTokens)) {
 			start = time.Now()
 		}
 	}
@@ -161,10 +170,12 @@ func run(r *Runner, cfg *AppConfig) error {
 	fmt.Println("\n--- Generation End ---")
 
 	// Report performance.
-	if pos > 1 {
+	// We calculate tokens/sec only for the generated part, not the prompt processing part.
+	generatedSteps := pos - int32(len(promptTokens))
+	if generatedSteps > 1 {
 		elapsed := time.Since(start)
 		if elapsed.Seconds() > 0 {
-			tokPerSec := float64(pos-1) / elapsed.Seconds()
+			tokPerSec := float64(generatedSteps) / elapsed.Seconds()
 			fmt.Printf("🚀 Achieved tokens/sec: %.2f\n", tokPerSec)
 		}
 	}

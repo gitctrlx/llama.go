@@ -1,4 +1,4 @@
-module github.com/qntx/llama2.go
+module github.com/qntx/llama.go
 
 go 1.20
 
