@@ -5,18 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-)
 
-// Config struct mirrors the official C code structure exactly
-type Config struct {
-	Dim       int32 // Model dimension
-	HiddenDim int32 // Hidden layer dimension
-	NLayers   int32 // Number of layers
-	NHeads    int32 // Number of attention heads
-	NKvHeads  int32 // Number of key-value heads
-	VocabSize int32 // Vocabulary size
-	SeqLen    int32 // Sequence length
-}
+	"github.com/qntx/llama2.go"
+)
 
 func main() {
 	// Check if model file path is provided
@@ -41,7 +32,7 @@ func main() {
 	defer f.Close()
 
 	// Read the Config struct
-	var config Config
+	var config llama2.Config
 	if err := binary.Read(f, binary.LittleEndian, &config); err != nil {
 		log.Fatalf("Failed to read config: %v", err)
 	}
