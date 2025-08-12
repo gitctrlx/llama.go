@@ -34,3 +34,7 @@ go.work.sum
 stories15M.bin
 stories45M.bin
 stories110M.bin
+
+stories15M_q80.bin
+stories45M_q80.bin
+stories110M_q80.bin

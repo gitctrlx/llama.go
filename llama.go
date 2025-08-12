@@ -17,11 +17,11 @@ type ProbIndex struct {
 
 // Config defines the transformer hyperparameters.
 type Config struct {
-	Dim       int32 // Embedding dimension
+	Dim       int32 // Transformer dimension
 	HiddenDim int32 // FFN hidden dimension
 	NLayers   int32 // Number of transformer layers
 	NHeads    int32 // Number of attention query heads
-	NKvHeads  int32 // Number of key/value heads (assumed == NHeads; multiquery not fully implemented)
+	NKvHeads  int32 // Number of key/value heads (GQA)
 	VocabSize int32 // Vocabulary size
 	SeqLen    int32 // Maximum sequence length
 }
@@ -114,9 +114,11 @@ func LoadCheckpoint(path string) (*Config, *TransformerWeights, error) {
 func NewTransformerWeights(c *Config) *TransformerWeights {
 	dim := c.Dim
 	hdim := c.HiddenDim
-	kv_dim := c.Dim
 	layers := c.NLayers
 	vocab := c.VocabSize
+
+	// GQA/MQA support: Calculate the key/value dimension
+	kv_dim := (c.Dim * c.NKvHeads) / c.NHeads
 
 	return &TransformerWeights{
 		TokenEmbeddingTable: make([]float32, vocab*dim),
@@ -137,11 +139,13 @@ func NewTransformerWeights(c *Config) *TransformerWeights {
 func NewRunState(c *Config) *RunState {
 	dim := c.Dim
 	hdim := c.HiddenDim
-	kv_dim := c.Dim
 	layers := c.NLayers
 	vocab := c.VocabSize
 	seq := c.SeqLen
 	heads := c.NHeads
+
+	// GQA/MQA support: Calculate the key/value dimension
+	kv_dim := (c.Dim * c.NKvHeads) / c.NHeads
 
 	return &RunState{
 		X:          make([]float32, dim),
