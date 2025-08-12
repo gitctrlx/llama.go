@@ -5,8 +5,15 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"sync"
 )
+
+// ProbIndex is used for sorting probabilities in top-p sampling.
+type ProbIndex struct {
+	Prob  float32
+	Index int
+}
 
 // Config defines the transformer hyperparameters.
 type Config struct {
@@ -359,10 +366,10 @@ func Softmax(x []float32) {
 	}
 }
 
-// Sample selects a token from logits (greedy if temp=0, else softmax sample).
-func Sample(logits []float32, temp float64, rng *rand.Rand) int32 {
+// Sample selects a token from logits using temperature, top-p, or greedy sampling.
+func Sample(logits []float32, temp float64, topp float64, rng *rand.Rand) int32 {
 	if temp == 0 {
-		// Greedy: argmax
+		// Greedy sampling: return the token with the highest logit.
 		maxIdx := 0
 		maxVal := logits[0]
 		for i := 1; i < len(logits); i++ {
@@ -374,22 +381,57 @@ func Sample(logits []float32, temp float64, rng *rand.Rand) int32 {
 		return int32(maxIdx)
 	}
 
-	// Temperature scaling
-	probs := make([]float32, len(logits))
-	copy(probs, logits)
-	for i := range probs {
-		probs[i] /= float32(temp)
+	// Temperature scaling.
+	for i := range logits {
+		logits[i] /= float32(temp)
 	}
-	Softmax(probs)
+	// Compute softmax in-place to get probabilities.
+	Softmax(logits)
 
-	// Sample from distribution
 	r := rng.Float32()
-	var cdf float32
-	for i, p := range probs {
-		cdf += p
-		if r < cdf {
-			return int32(i)
+
+	// If topp is not used, perform simple temperature sampling.
+	if topp <= 0 || topp >= 1 {
+		var cdf float32
+		for i, p := range logits {
+			cdf += p
+			if r < cdf {
+				return int32(i)
+			}
+		}
+		return int32(len(logits) - 1) // Fallback.
+	}
+
+	// Top-p (nucleus) sampling.
+	// 1. Create and sort probabilities along with their original indices.
+	probIndex := make([]ProbIndex, len(logits))
+	for i, p := range logits {
+		probIndex[i] = ProbIndex{Prob: p, Index: i}
+	}
+	sort.Slice(probIndex, func(i, j int) bool {
+		return probIndex[i].Prob > probIndex[j].Prob
+	})
+
+	// 2. Find the nucleus: the smallest set of tokens whose cumulative probability exceeds topp.
+	var cumProb float32
+	lastIdx := 0
+	for i, pi := range probIndex {
+		cumProb += pi.Prob
+		if cumProb > float32(topp) {
+			lastIdx = i
+			break // The nucleus is probIndex[:lastIdx+1]
 		}
 	}
-	return int32(len(probs) - 1) // Fallback for rounding
+
+	// 3. Sample from the nucleus.
+	r = r * cumProb // Rescale random number to the range [0, cumProb).
+	var cdf float32
+	for i := 0; i <= lastIdx; i++ {
+		cdf += probIndex[i].Prob
+		if r < cdf {
+			return int32(probIndex[i].Index)
+		}
+	}
+
+	return int32(probIndex[lastIdx].Index) // Fallback for rounding errors.
 }

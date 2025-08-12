@@ -16,6 +16,7 @@ type AppConfig struct {
 	CheckpointPath string
 	TokenizerPath  string
 	Temperature    float64
+	Topp           float64 // Add this line
 	Steps          int32
 	Prompt         string
 	Seed           int64
@@ -50,6 +51,7 @@ func main() {
 	// Bind command-line flags to the AppConfig struct.
 	rootCmd.Flags().StringVar(&cfg.TokenizerPath, "tokenizer", "./tokenizer.bin", "Path to tokenizer file")
 	rootCmd.Flags().Float64Var(&cfg.Temperature, "temperature", 0.9, "Sampling temperature (0 for greedy)")
+	rootCmd.Flags().Float64Var(&cfg.Topp, "topp", 0.9, "Top-p (nucleus) sampling threshold")
 	rootCmd.Flags().Int32Var(&cfg.Steps, "steps", 256, "Max generation steps (0 uses seq_len)")
 	rootCmd.Flags().StringVar(&cfg.Prompt, "prompt", "Once upon a time", "Input prompt")
 	rootCmd.Flags().Int64Var(&cfg.Seed, "seed", time.Now().UnixNano(), "RNG seed")
@@ -144,7 +146,7 @@ func run(r *Runner, cfg *AppConfig) error {
 			next = promptTokens[pos+1]
 		} else {
 			// Otherwise, we are in "generation" mode: sample from the model's output distribution.
-			next = llama.Sample(r.state.Logits, cfg.Temperature, r.rng)
+			next = llama.Sample(r.state.Logits, cfg.Temperature, cfg.Topp, r.rng)
 		}
 
 		// Print the token, handling special cases.
