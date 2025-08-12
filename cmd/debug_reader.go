@@ -7,57 +7,60 @@ import (
 	"os"
 )
 
-// 只保留 Config 结构体，和官方 C 代码完全对应
+// Config struct mirrors the official C code structure exactly
 type Config struct {
-	Dim       int32
-	HiddenDim int32
-	NLayers   int32
-	NHeads    int32
-	NKvHeads  int32
-	VocabSize int32
-	SeqLen    int32
+	Dim       int32 // Model dimension
+	HiddenDim int32 // Hidden layer dimension
+	NLayers   int32 // Number of layers
+	NHeads    int32 // Number of attention heads
+	NKvHeads  int32 // Number of key-value heads
+	VocabSize int32 // Vocabulary size
+	SeqLen    int32 // Sequence length
 }
 
 func main() {
+	// Check if model file path is provided
 	if len(os.Args) < 2 {
-		log.Fatal("请提供模型文件路径，例如：go run debug_reader.go ./stories15M.bin")
+		log.Fatal("Please provide the model file path, e.g.,: go run debug_reader.go ./stories15M.bin")
 	}
 	filePath := os.Args[1]
 
-	// 获取文件总大小，用于对比
+	// Get file size for comparison
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
-		log.Fatalf("无法获取文件信息: %v", err)
+		log.Fatalf("Failed to get file info: %v", err)
 	}
-	fmt.Printf("文件总大小: %d 字节\n", fileInfo.Size())
+	fmt.Printf("Total file size: %d bytes\n", fileInfo.Size())
 	fmt.Println("---------------------------------")
 
+	// Open the model file
 	f, err := os.Open(filePath)
 	if err != nil {
-		log.Fatalf("无法打开文件: %v", err)
+		log.Fatalf("Failed to open file: %v", err)
 	}
 	defer f.Close()
 
+	// Read the Config struct
 	var config Config
-	// 只读取 Config 结构体
 	if err := binary.Read(f, binary.LittleEndian, &config); err != nil {
-		log.Fatalf("读取 config 失败: %v", err)
+		log.Fatalf("Failed to read config: %v", err)
 	}
 
-	fmt.Println("成功读取 Config 结构体，内容如下:")
-	fmt.Printf("  Dim (维度):       %d\n", config.Dim)
-	fmt.Printf("  HiddenDim (隐藏层): %d\n", config.HiddenDim)
-	fmt.Printf("  NLayers (层数):     %d\n", config.NLayers)
-	fmt.Printf("  NHeads (查询头):    %d\n", config.NHeads)
-	fmt.Printf("  NKvHeads (键值头):  %d\n", config.NKvHeads)
-	fmt.Printf("  VocabSize (词汇表): %d\n", config.VocabSize)
-	fmt.Printf("  SeqLen (序列长度):  %d\n", config.SeqLen)
+	// Print the Config struct contents
+	fmt.Println("Successfully read Config struct, contents:")
+	fmt.Printf("  Dim (dimension):       %d\n", config.Dim)
+	fmt.Printf("  HiddenDim (hidden layer): %d\n", config.HiddenDim)
+	fmt.Printf("  NLayers (layers):     %d\n", config.NLayers)
+	fmt.Printf("  NHeads (heads):       %d\n", config.NHeads)
+	fmt.Printf("  NKvHeads (key-value heads): %d\n", config.NKvHeads)
+	fmt.Printf("  VocabSize (vocabulary): %d\n", config.VocabSize)
+	fmt.Printf("  SeqLen (sequence length): %d\n", config.SeqLen)
 	fmt.Println("---------------------------------")
 
-	// 让我们手动计算一下 stories15M.bin 的理论大小
-	// Config 本身是 7 个 int32 = 28 字节
-	// 我们知道 stories15M 的正确 VocabSize 是 32000
-	// 如果读出的 VocabSize 是个奇怪的负数，这里就会很明显
+	// Calculate theoretical size of stories15M.bin
+	// Config itself is 7 int32 = 28 bytes
+	// Known correct VocabSize for stories15M is 32000
+	// Negative VocabSize would indicate an issue
 	trueVocabSize := config.VocabSize
 	// sharedWeights := false
 	// if trueVocabSize < 0 {
@@ -65,7 +68,7 @@ func main() {
 	// 	sharedWeights = true
 	// }
 
-	// 权重参数量计算 (来自 llama2.c 的 `build_transformer` 函数)
+	// Calculate parameter count (based on llama2.c's `build_transformer` function)
 	tokenEmbeddingTable := int64(trueVocabSize) * int64(config.Dim)
 	rmsAttWeight := int64(config.NLayers) * int64(config.Dim)
 	wq := int64(config.NLayers) * int64(config.Dim) * int64(config.Dim)
@@ -80,21 +83,22 @@ func main() {
 	freqCisReal := int64(config.SeqLen) * int64(config.Dim) / 2
 	freqCisImag := int64(config.SeqLen) * int64(config.Dim) / 2
 
+	// Sum all parameters
 	totalParams := tokenEmbeddingTable + rmsAttWeight + wq + wk + wv + wo + rmsFfnWeight + w1 + w2 + w3 + rmsFinalWeight + freqCisReal + freqCisImag
 
-	// 如果权重共享，最后的分类器权重是不存在的
-	// 在 llama2.c 中，这个权重和 tokenEmbeddingTable 是同一个，但文件里只存一份
-	// 实际上，最终的分类器权重并没有被单独写进文件，而是直接用了 embedding table
-	// 所以我们不需要从 totalParams 中减去它
+	// If weights are shared, the final classifier weights are not stored separately
+	// In llama2.c, these reuse the tokenEmbeddingTable, so no separate storage in the file
+	// No need to subtract from totalParams
 
-	// 总字节数 = 头部(28字节) + 参数量 * 4字节/参数
+	// Total bytes = header (28 bytes) + parameters * 4 bytes/parameter
 	expectedSize := 28 + totalParams*4
 
-	fmt.Printf("根据读取到的 Config，计算出的理论文件大小应为: %d 字节\n", expectedSize)
+	fmt.Printf("Calculated theoretical file size based on Config: %d bytes\n", expectedSize)
 
+	// Compare actual and expected file sizes
 	if fileInfo.Size() < expectedSize {
-		fmt.Println("\n结论: 文件实际大小 < 理论大小。文件确实不完整或Config读取有误。")
+		fmt.Println("\nConclusion: Actual file size < theoretical size. File is likely incomplete or Config is misread.")
 	} else {
-		fmt.Println("\n结论: 文件大小看起来是足夠的。问题可能更复杂，比如Go的内存分配或读取逻辑。")
+		fmt.Println("\nConclusion: File size appears sufficient. Issue may be more complex, e.g., Go memory allocation or read logic.")
 	}
 }
