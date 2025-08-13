@@ -308,10 +308,9 @@ func AttentionQ8(l, pos int32, c *QuantizedConfig, s *QuantizedRunState, w *Quan
 	copy(s.ValueCache[cacheLoff+pos*kvDim:(cacheLoff+(pos+1)*kvDim)], s.V)
 
 	var wg sync.WaitGroup
-	wg.Add(int(heads))
-	for h := range heads {
-		go func(h int32) {
-			defer wg.Done()
+	for h_idx := range heads {
+		h := int32(h_idx)
+		wg.Go(func() {
 			q := s.Q[h*headSize : (h+1)*headSize]
 			att := s.Att[h*c.SeqLen : (h+1)*c.SeqLen]
 			for t := int32(0); t <= pos; t++ {
@@ -336,7 +335,7 @@ func AttentionQ8(l, pos int32, c *QuantizedConfig, s *QuantizedRunState, w *Quan
 					xb_head[i] += a * v[i]
 				}
 			}
-		}(h)
+		})
 	}
 	wg.Wait()
 

@@ -236,11 +236,10 @@ func Attention(l int32, pos int32, c *Config, s *RunState, w *TransformerWeights
 
 	// 5. Multi-head Attention Calculation (parallelized with goroutines)
 	var wg sync.WaitGroup
-	wg.Add(int(heads))
-	for h := range heads {
-		go func(h int32) {
-			defer wg.Done()
+	for h_idx := range heads {
+		h := int32(h_idx)
 
+		wg.Go(func() {
 			// Get the query vector for this head
 			q := s.Q[h*headSize : (h+1)*headSize]
 			// Attention scores buffer for this head
@@ -285,7 +284,7 @@ func Attention(l int32, pos int32, c *Config, s *RunState, w *TransformerWeights
 					xb_head[i] += a * v[i]
 				}
 			}
-		}(h)
+		})
 	}
 	wg.Wait()
 
