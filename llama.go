@@ -15,365 +15,397 @@ type ProbIndex struct {
 	Index int
 }
 
-// Config defines the transformer hyperparameters.
-type Config struct {
-	Dim       int32 // Transformer dimension
-	HiddenDim int32 // FFN hidden dimension
-	NLayers   int32 // Number of transformer layers
-	NHeads    int32 // Number of attention query heads
-	NKvHeads  int32 // Number of key/value heads (GQA)
-	VocabSize int32 // Vocabulary size
-	SeqLen    int32 // Maximum sequence length
+// LlamaConfig defines the transformer hyperparameters, aligning with LlamaConfig in Hugging Face Transformers.
+type LlamaConfig struct {
+	Dim       int32 // Transformer embedding dimension (hidden_size)
+	HiddenDim int32 // FFN intermediate dimension (intermediate_size)
+	NLayers   int32 // Number of decoder layers (num_hidden_layers)
+	NHeads    int32 // Number of query attention heads (num_attention_heads)
+	NKvHeads  int32 // Number of key/value heads for GQA (num_key_value_heads)
+	VocabSize int32 // Vocabulary size (vocab_size)
+	SeqLen    int32 // Maximum context length (max_position_embeddings)
 }
 
-// TransformerWeights holds the model parameters.
-type TransformerWeights struct {
-	TokenEmbeddingTable []float32 // (vocab_size, dim)
-	RmsAttWeight        []float32 // (n_layers, dim)
-	RmsFfnWeight        []float32 // (n_layers, dim)
-	Wq                  []float32 // (n_layers, dim, dim)
-	Wk                  []float32 // (n_layers, dim, dim)
-	Wv                  []float32 // (n_layers, dim, dim)
-	Wo                  []float32 // (n_layers, dim, dim)
-	W1                  []float32 // (n_layers, hidden_dim, dim)
-	W2                  []float32 // (n_layers, dim, hidden_dim)
-	W3                  []float32 // (n_layers, hidden_dim, dim)
-	RmsFinalWeight      []float32 // (dim)
+// LlamaLayerWeights groups weights for a single decoder layer.
+type LlamaLayerWeights struct {
+	// Self-attention
+	AttnNorm []float32 // Input RMSNorm weights (input_layernorm)
+	QProj    []float32 // Query projection (self_attn.q_proj.weight)
+	KProj    []float32 // Key projection (self_attn.k_proj.weight)
+	VProj    []float32 // Value projection (self_attn.v_proj.weight)
+	OProj    []float32 // Output projection (self_attn.o_proj.weight)
+	// FFN
+	FFNNorm  []float32 // Post-attention RMSNorm weights (post_attention_layernorm)
+	GateProj []float32 // Gate projection in MLP (mlp.gate_proj.weight)
+	UpProj   []float32 // Up projection in MLP (mlp.up_proj.weight)
+	DownProj []float32 // Down projection in MLP (mlp.down_proj.weight)
 }
 
-// RunState holds runtime buffers for inference.
-type RunState struct {
-	X          []float32 // Current activation (dim)
-	Xb         []float32 // Residual branch buffer (dim)
-	Xb2        []float32 // Additional residual buffer (dim)
-	Hb         []float32 // FFN hidden buffer (hidden_dim)
-	Hb2        []float32 // FFN hidden buffer (hidden_dim)
-	Q          []float32 // Query vector (dim)
-	K          []float32 // Key vector (dim)
-	V          []float32 // Value vector (dim)
-	Att        []float32 // Attention scores (n_heads, seq_len)
-	Logits     []float32 // Output logits (vocab_size)
-	KeyCache   []float32 // KV cache for keys (n_layers, seq_len, dim)
-	ValueCache []float32 // KV cache for values (n_layers, seq_len, dim)
+// LlamaWeights holds all model parameters, aligning with LlamaModel weights in Transformers.
+type LlamaWeights struct {
+	EmbedTokens []float32           // Token embeddings (model.embed_tokens.weight)
+	Layers      []LlamaLayerWeights // Decoder layers (model.layers)
+	Norm        []float32           // Final RMSNorm (model.norm.weight)
 }
 
-const rmsEps = 1e-5 // Epsilon for RMS norm stability
+// LlamaState holds runtime buffers for inference, aligning with forward pass states.
+type LlamaState struct {
+	X          []float32   // Current hidden state (hidden_states)
+	Xb         []float32   // Buffer for attention output before projection
+	Xb2        []float32   // Temp buffer for attention projection output
+	Hb         []float32   // FFN gate activation buffer
+	Hb2        []float32   // FFN up activation buffer
+	Q          []float32   // Query vector
+	K          []float32   // Key vector
+	V          []float32   // Value vector
+	Att        [][]float32 // Attention scores per head [n_heads][seq_len]
+	Logits     []float32   // Output logits
+	KeyCache   [][]float32 // Key cache [n_layers][seq_len * kv_dim]
+	ValueCache [][]float32 // Value cache [n_layers][seq_len * kv_dim]
+}
 
-// LoadCheckpoint reads config and weights from a binary file.
-func LoadCheckpoint(path string) (*Config, *TransformerWeights, error) {
+const rmsEps = 1e-5 // RMSNorm epsilon, aligning with rms_norm_eps
+
+// LoadLlamaModel reads config and weights from a binary checkpoint file.
+func LoadLlamaModel(path string) (*LlamaConfig, *LlamaWeights, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer f.Close()
 
-	var config Config
-	if err := binary.Read(f, binary.LittleEndian, &config); err != nil {
+	var c LlamaConfig
+	if err := binary.Read(f, binary.LittleEndian, &c); err != nil {
 		return nil, nil, err
 	}
 
-	weights := NewTransformerWeights(&config)
-	if err := binary.Read(f, binary.LittleEndian, &weights.TokenEmbeddingTable); err != nil {
-		return nil, nil, err
+	dim := int(c.Dim)
+	hdim := int(c.HiddenDim)
+	layers := int(c.NLayers)
+	vocab := int(c.VocabSize)
+	kvDim := int((c.Dim * c.NKvHeads) / c.NHeads)
+
+	// Allocate structured weights
+	w := &LlamaWeights{
+		EmbedTokens: make([]float32, vocab*dim),
+		Layers:      make([]LlamaLayerWeights, layers),
+		Norm:        make([]float32, dim),
 	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.RmsAttWeight); err != nil {
-		return nil, nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.Wq); err != nil {
-		return nil, nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.Wk); err != nil {
-		return nil, nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.Wv); err != nil {
-		return nil, nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.Wo); err != nil {
-		return nil, nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.RmsFfnWeight); err != nil {
-		return nil, nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.W1); err != nil {
-		return nil, nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.W2); err != nil {
-		return nil, nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.W3); err != nil {
-		return nil, nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &weights.RmsFinalWeight); err != nil {
+
+	// Read flat buffers
+	if err := binary.Read(f, binary.LittleEndian, w.EmbedTokens); err != nil {
 		return nil, nil, err
 	}
 
-	return &config, weights, nil
+	rmsAttFlat := make([]float32, layers*dim)
+	if err := binary.Read(f, binary.LittleEndian, rmsAttFlat); err != nil {
+		return nil, nil, err
+	}
+
+	wqFlat := make([]float32, layers*dim*dim)
+	if err := binary.Read(f, binary.LittleEndian, wqFlat); err != nil {
+		return nil, nil, err
+	}
+
+	wkFlat := make([]float32, layers*dim*kvDim)
+	if err := binary.Read(f, binary.LittleEndian, wkFlat); err != nil {
+		return nil, nil, err
+	}
+
+	wvFlat := make([]float32, layers*dim*kvDim)
+	if err := binary.Read(f, binary.LittleEndian, wvFlat); err != nil {
+		return nil, nil, err
+	}
+
+	woFlat := make([]float32, layers*dim*dim)
+	if err := binary.Read(f, binary.LittleEndian, woFlat); err != nil {
+		return nil, nil, err
+	}
+
+	rmsFfnFlat := make([]float32, layers*dim)
+	if err := binary.Read(f, binary.LittleEndian, rmsFfnFlat); err != nil {
+		return nil, nil, err
+	}
+
+	gateFlat := make([]float32, layers*hdim*dim)
+	if err := binary.Read(f, binary.LittleEndian, gateFlat); err != nil {
+		return nil, nil, err
+	}
+
+	downFlat := make([]float32, layers*dim*hdim)
+	if err := binary.Read(f, binary.LittleEndian, downFlat); err != nil {
+		return nil, nil, err
+	}
+
+	upFlat := make([]float32, layers*hdim*dim)
+	if err := binary.Read(f, binary.LittleEndian, upFlat); err != nil {
+		return nil, nil, err
+	}
+
+	if err := binary.Read(f, binary.LittleEndian, w.Norm); err != nil {
+		return nil, nil, err
+	}
+
+	// Assign to per-layer structures
+	for l := 0; l < layers; l++ {
+		layer := &w.Layers[l]
+
+		off := l * dim
+		layer.AttnNorm = make([]float32, dim)
+		copy(layer.AttnNorm, rmsAttFlat[off:off+dim])
+
+		off = l * dim * dim
+		layer.QProj = make([]float32, dim*dim)
+		copy(layer.QProj, wqFlat[off:off+dim*dim])
+
+		off = l * dim * kvDim
+		layer.KProj = make([]float32, dim*kvDim)
+		copy(layer.KProj, wkFlat[off:off+dim*kvDim])
+
+		layer.VProj = make([]float32, dim*kvDim)
+		copy(layer.VProj, wvFlat[off:off+dim*kvDim])
+
+		off = l * dim * dim
+		layer.OProj = make([]float32, dim*dim)
+		copy(layer.OProj, woFlat[off:off+dim*dim])
+
+		off = l * dim
+		layer.FFNNorm = make([]float32, dim)
+		copy(layer.FFNNorm, rmsFfnFlat[off:off+dim])
+
+		off = l * hdim * dim
+		layer.GateProj = make([]float32, hdim*dim)
+		copy(layer.GateProj, gateFlat[off:off+hdim*dim])
+
+		off = l * dim * hdim
+		layer.DownProj = make([]float32, dim*hdim)
+		copy(layer.DownProj, downFlat[off:off+dim*hdim])
+
+		off = l * hdim * dim
+		layer.UpProj = make([]float32, hdim*dim)
+		copy(layer.UpProj, upFlat[off:off+hdim*dim])
+	}
+
+	return &c, w, nil
 }
 
-// NewTransformerWeights allocates slices for weights based on config.
-func NewTransformerWeights(c *Config) *TransformerWeights {
-	dim := c.Dim
-	hdim := c.HiddenDim
-	layers := c.NLayers
-	vocab := c.VocabSize
+// NewLlamaState allocates inference buffers based on config.
+func NewLlamaState(c *LlamaConfig) *LlamaState {
+	dim := int(c.Dim)
+	hdim := int(c.HiddenDim)
+	heads := int(c.NHeads)
+	seq := int(c.SeqLen)
+	kvDim := int((c.Dim * c.NKvHeads) / c.NHeads)
 
-	// GQA/MQA support: Calculate the key/value dimension
-	kv_dim := (c.Dim * c.NKvHeads) / c.NHeads
-
-	return &TransformerWeights{
-		TokenEmbeddingTable: make([]float32, vocab*dim),
-		RmsAttWeight:        make([]float32, layers*dim),
-		RmsFfnWeight:        make([]float32, layers*dim),
-		Wq:                  make([]float32, layers*dim*dim),
-		Wk:                  make([]float32, layers*dim*kv_dim),
-		Wv:                  make([]float32, layers*dim*kv_dim),
-		Wo:                  make([]float32, layers*dim*dim),
-		W1:                  make([]float32, layers*hdim*dim),
-		W2:                  make([]float32, layers*dim*hdim),
-		W3:                  make([]float32, layers*hdim*dim),
-		RmsFinalWeight:      make([]float32, dim),
-	}
-}
-
-// NewRunState allocates slices for run state based on config.
-func NewRunState(c *Config) *RunState {
-	dim := c.Dim
-	hdim := c.HiddenDim
-	layers := c.NLayers
-	vocab := c.VocabSize
-	seq := c.SeqLen
-	heads := c.NHeads
-
-	// GQA/MQA support: Calculate the key/value dimension
-	kv_dim := (c.Dim * c.NKvHeads) / c.NHeads
-
-	return &RunState{
+	s := &LlamaState{
 		X:          make([]float32, dim),
 		Xb:         make([]float32, dim),
 		Xb2:        make([]float32, dim),
 		Hb:         make([]float32, hdim),
 		Hb2:        make([]float32, hdim),
 		Q:          make([]float32, dim),
-		K:          make([]float32, kv_dim),
-		V:          make([]float32, kv_dim),
-		Att:        make([]float32, heads*seq),
-		Logits:     make([]float32, vocab),
-		KeyCache:   make([]float32, layers*seq*kv_dim),
-		ValueCache: make([]float32, layers*seq*kv_dim),
+		K:          make([]float32, kvDim),
+		V:          make([]float32, kvDim),
+		Logits:     make([]float32, c.VocabSize),
+		Att:        make([][]float32, heads),
+		KeyCache:   make([][]float32, c.NLayers),
+		ValueCache: make([][]float32, c.NLayers),
 	}
+
+	for i := range s.Att {
+		s.Att[i] = make([]float32, seq)
+	}
+
+	for i := range s.KeyCache {
+		s.KeyCache[i] = make([]float32, seq*kvDim)
+		s.ValueCache[i] = make([]float32, seq*kvDim)
+	}
+
+	return s
 }
 
-// Transformer performs a forward pass for one token at position pos.
-func Transformer(token, pos int32, c *Config, s *RunState, w *TransformerWeights) {
-	// Embed token into the main activation vector s.X
-	copy(s.X, w.TokenEmbeddingTable[token*c.Dim:(token+1)*c.Dim])
+// LlamaForward performs a single-token forward pass, aligning with LlamaModel.forward.
+func LlamaForward(token int32, pos int32, c *LlamaConfig, s *LlamaState, w *LlamaWeights) {
+	dim := c.Dim
 
-	// Process all transformer layers
+	// Token embedding
+	copy(s.X, w.EmbedTokens[token*dim:(token+1)*dim])
+
+	// Decoder layers
 	for l := int32(0); l < c.NLayers; l++ {
-		// Attention sub-layer
-		Attention(l, pos, c, s, w)
+		// Self-attention block
+		llamaAttention(l, pos, c, s, w.Layers[l])
 
-		// Feed-forward sub-layer
-		FeedForward(l, c, s, w)
+		// FFN block
+		llamaMLP(c, s, w.Layers[l])
 	}
 
-	// Final RMS norm on the output
-	RMSNorm(s.X, s.X, w.RmsFinalWeight)
+	// Final norm
+	rmsNorm(s.X, s.X, w.Norm)
 
-	// Classifier output
-	Matmul(s.Logits, s.X, w.TokenEmbeddingTable)
+	// Logits (using tied embeddings)
+	matmul(s.Logits, s.X, w.EmbedTokens)
 }
 
-// Attention performs the multi-head attention for a single layer.
-func Attention(l int32, pos int32, c *Config, s *RunState, w *TransformerWeights) {
+// llamaAttention computes self-attention for one layer, aligning with LlamaAttention.forward.
+func llamaAttention(layerIdx int32, pos int32, c *LlamaConfig, s *LlamaState, lw LlamaLayerWeights) {
 	dim := c.Dim
 	heads := c.NHeads
-	kv_dim := (c.Dim * c.NKvHeads) / c.NHeads
-	kv_mul := heads / c.NKvHeads
 	headSize := dim / heads
+	kvDim := int((c.Dim * c.NKvHeads) / c.NHeads)
+	groupSize := heads / c.NKvHeads
 
-	// 1. Attention RMSNorm
-	RMSNorm(s.Xb, s.X, w.RmsAttWeight[l*dim:(l+1)*dim])
+	// Input norm
+	rmsNorm(s.Xb, s.X, lw.AttnNorm)
 
-	// 2. Q, K, V Projections
-	wq_loff := l * dim * dim
-	wk_loff := l * dim * kv_dim
-	wv_loff := l * dim * kv_dim
-	Matmul(s.Q, s.Xb, w.Wq[wq_loff:wq_loff+dim*dim])
-	Matmul(s.K, s.Xb, w.Wk[wk_loff:wk_loff+dim*kv_dim])
-	Matmul(s.V, s.Xb, w.Wv[wv_loff:wv_loff+dim*kv_dim])
+	// QKV projections
+	matmul(s.Q, s.Xb, lw.QProj)
+	matmul(s.K, s.Xb, lw.KProj)
+	matmul(s.V, s.Xb, lw.VProj)
 
-	// 3. RoPE (Rotary Positional Encoding)
-	// Apply to Q vector
-	for i := int32(0); i < dim; i += 2 {
-		headDim := i % headSize
-		freq := 1.0 / float32(math.Pow(10000.0, float64(headDim)/float64(headSize)))
-		val := float64(pos) * float64(freq)
-		fcr := float32(math.Cos(val))
-		fci := float32(math.Sin(val))
+	// Apply RoPE
+	applyRotaryEmb(s.Q, pos, headSize)
+	applyRotaryEmb(s.K, pos, headSize)
 
-		q0, q1 := s.Q[i], s.Q[i+1]
-		s.Q[i] = q0*fcr - q1*fci
-		s.Q[i+1] = q0*fci + q1*fcr
-	}
-	// Apply to K vector (only up to kv_dim)
-	for i := int32(0); i < kv_dim; i += 2 {
-		headDim := i % headSize
-		freq := 1.0 / float32(math.Pow(10000.0, float64(headDim)/float64(headSize)))
-		val := float64(pos) * float64(freq)
-		fcr := float32(math.Cos(val))
-		fci := float32(math.Sin(val))
+	// Cache K and V
+	layerKeyCache := s.KeyCache[layerIdx]
+	copy(layerKeyCache[pos*int32(kvDim):(pos+1)*int32(kvDim)], s.K)
+	layerValueCache := s.ValueCache[layerIdx]
+	copy(layerValueCache[pos*int32(kvDim):(pos+1)*int32(kvDim)], s.V)
 
-		k0, k1 := s.K[i], s.K[i+1]
-		s.K[i] = k0*fcr - k1*fci
-		s.K[i+1] = k0*fci + k1*fcr
-	}
-
-	// 4. Cache K and V for future timesteps
-	cache_loff := l * c.SeqLen * kv_dim
-	copy(s.KeyCache[cache_loff+pos*kv_dim:cache_loff+(pos+1)*kv_dim], s.K)
-	copy(s.ValueCache[cache_loff+pos*kv_dim:cache_loff+(pos+1)*kv_dim], s.V)
-
-	// 5. Multi-head Attention Calculation (parallelized with goroutines)
+	// Multi-head attention (parallelized)
 	var wg sync.WaitGroup
-	for h_idx := range heads {
-		h := int32(h_idx)
+	wg.Add(int(heads))
+	for h := range heads {
+		go func(h int32) {
+			defer wg.Done()
 
-		wg.Go(func() {
-			// Get the query vector for this head
-			q := s.Q[h*headSize : (h+1)*headSize]
-			// Attention scores buffer for this head
-			att := s.Att[h*c.SeqLen : (h+1)*c.SeqLen]
+			// Query slice for head
+			qOff := int(h * headSize)
+			q := s.Q[qOff : qOff+int(headSize)]
 
-			// Iterate over all timesteps up to the current one
+			// Attention scores
+			att := s.Att[h]
+
+			kvH := h / groupSize
 			for t := int32(0); t <= pos; t++ {
-				// Get the key vector for this timestep
-				// GQA: Map query head 'h' to the correct KV head 'kv_h'
-				kv_h := h / kv_mul
-				k_loff := cache_loff + t*kv_dim + kv_h*headSize
-				k := s.KeyCache[k_loff : k_loff+headSize]
+				kOff := int(t)*kvDim + int(kvH*headSize)
+				k := layerKeyCache[kOff : kOff+int(headSize)]
 
-				// Calculate the attention score (dot product of Q and K)
-				score := float32(0)
+				var score float32
 				for i := range headSize {
 					score += q[i] * k[i]
 				}
 				score /= float32(math.Sqrt(float64(headSize)))
+
 				att[t] = score
 			}
 
-			// Softmax the scores to get attention weights
-			Softmax(att[:pos+1])
+			// Softmax
+			softmax(att[:pos+1])
 
-			// Weighted sum of the values
-			xb_head := s.Xb[h*headSize : (h+1)*headSize]
-			for i := range xb_head {
-				xb_head[i] = 0
+			// Weighted values (output to Xb per head)
+			xbOff := int(h * headSize)
+			xbHead := s.Xb[xbOff : xbOff+int(headSize)]
+			for i := range xbHead {
+				xbHead[i] = 0
 			}
 			for t := int32(0); t <= pos; t++ {
-				// Get the value vector for this timestep
-				// GQA: Map query head 'h' to the correct KV head 'kv_h'
-				kv_h := h / kv_mul
-				v_loff := cache_loff + t*kv_dim + kv_h*headSize
-				v := s.ValueCache[v_loff : v_loff+headSize]
+				vOff := int(t)*kvDim + int(kvH*headSize)
+				v := layerValueCache[vOff : vOff+int(headSize)]
 
-				// Get the attention weight for this timestep
 				a := att[t]
-				// Accumulate the weighted value
 				for i := range headSize {
-					xb_head[i] += a * v[i]
+					xbHead[i] += a * v[i]
 				}
 			}
-		})
+		}(h)
 	}
 	wg.Wait()
 
-	// 6. Output Projection
-	wo_loff := l * dim * dim
-	Matmul(s.Xb2, s.Xb, w.Wo[wo_loff:wo_loff+dim*dim])
+	// Output projection
+	matmul(s.Xb2, s.Xb, lw.OProj)
 
-	// 7. Residual Connection
-	for i := range dim {
-		s.X[i] += s.Xb2[i]
-	}
+	// Residual add
+	accum(s.X, s.Xb2)
 }
 
-// FeedForward performs the feed-forward network for a single layer.
-func FeedForward(l int32, c *Config, s *RunState, w *TransformerWeights) {
-	dim := c.Dim
-	hdim := c.HiddenDim
+// llamaMLP computes the FFN for one layer, aligning with LlamaMLP.forward.
+func llamaMLP(c *LlamaConfig, s *LlamaState, lw LlamaLayerWeights) {
+	// Input norm
+	rmsNorm(s.Xb, s.X, lw.FFNNorm)
 
-	// FFN RMS norm
-	RMSNorm(s.Xb, s.X, w.RmsFfnWeight[l*dim:(l+1)*dim])
+	// Gate and up projections
+	matmul(s.Hb, s.Xb, lw.GateProj)
+	matmul(s.Hb2, s.Xb, lw.UpProj)
 
-	// FFN
-	w1_loff := l * hdim * dim
-	w3_loff := l * hdim * dim
-	Matmul(s.Hb, s.Xb, w.W1[w1_loff:w1_loff+hdim*dim])
-	Matmul(s.Hb2, s.Xb, w.W3[w3_loff:w3_loff+hdim*dim])
-
-	// Apply SwiGLU non-linearity by calling our new helper function
-	SwiGLU(s, c)
-
-	// FFN output projection
-	w2_loff := l * dim * hdim
-	Matmul(s.Xb, s.Hb, w.W2[w2_loff:w2_loff+dim*hdim])
-
-	// Residual connection
-	for i := range dim {
-		s.X[i] += s.Xb[i]
-	}
-}
-
-// SwiGLU performs the SwiGLU non-linearity.
-// val = (x * sigmoid(x)) * w3(x)
-func SwiGLU(s *RunState, c *Config) {
-	hdim := c.HiddenDim
-	for i := range hdim {
+	// SwiGLU activation
+	for i := int32(0); i < c.HiddenDim; i++ {
 		val := s.Hb[i]
-		// silu(x) = x * sigmoid(x)
 		val *= 1.0 / (1.0 + float32(math.Exp(float64(-val))))
-		// elementwise multiply with w3(x)
 		val *= s.Hb2[i]
 		s.Hb[i] = val
 	}
+
+	// Down projection
+	matmul(s.Xb, s.Hb, lw.DownProj)
+
+	// Residual add
+	accum(s.X, s.Xb)
 }
 
-// Matmul computes xout = w * x (matrix-vector multiply).
-func Matmul(xout, x, w []float32) {
-	n := len(x)     // Input dim
-	d := len(w) / n // Output dim
-	for i := range d {
+// applyRotaryEmb applies rotary positional embeddings, aligning with apply_rotary_pos_emb.
+func applyRotaryEmb(x []float32, pos int32, headSize int32) {
+	for i := int32(0); i < int32(len(x)); i += 2 {
+		headDim := i % headSize
+		freq := 1.0 / float32(math.Pow(10000.0, float64(headDim)/float64(headSize)))
+		val := float64(pos) * float64(freq)
+		fcr := float32(math.Cos(val))
+		fci := float32(math.Sin(val))
+
+		x0, x1 := x[i], x[i+1]
+		x[i] = x0*fcr - x1*fci
+		x[i+1] = x0*fci + x1*fcr
+	}
+}
+
+// matmul computes matrix-vector multiplication: xout = x @ w.T (assuming w is row-major flattened).
+func matmul(xout, x, w []float32) {
+	inDim := len(x)
+	outDim := len(xout)
+	for i := 0; i < outDim; i++ {
 		var val float32
-		for j := range n {
-			val += w[i*n+j] * x[j]
+		off := i * inDim
+		for j := 0; j < inDim; j++ {
+			val += w[off+j] * x[j]
 		}
 		xout[i] = val
 	}
 }
 
-// Accum adds b to a element-wise.
-func Accum(a, b []float32) {
+// accum adds b to a element-wise.
+func accum(a, b []float32) {
 	for i := range a {
 		a[i] += b[i]
 	}
 }
 
-// RMSNorm normalizes src into dest using weight (RMS normalization).
-func RMSNorm(dest, src, weight []float32) {
+// rmsNorm applies RMS normalization, aligning with LlamaRMSNorm.forward.
+func rmsNorm(dest, src, weight []float32) {
+	n := len(src)
 	var ss float32
 	for _, v := range src {
 		ss += v * v
 	}
-	ss = ss/float32(len(src)) + rmsEps
-	ss = 1 / float32(math.Sqrt(float64(ss)))
-	for i, v := range src {
-		dest[i] = weight[i] * (ss * v)
+	ss = ss/float32(n) + rmsEps
+	inv := 1 / float32(math.Sqrt(float64(ss)))
+	for i := range dest {
+		dest[i] = weight[i] * (inv * src[i])
 	}
 }
 
-// Softmax normalizes x in-place to probabilities.
-func Softmax(x []float32) {
+// softmax computes softmax in-place.
+func softmax(x []float32) {
 	n := len(x)
 	if n == 0 {
 		return
@@ -394,10 +426,9 @@ func Softmax(x []float32) {
 	}
 }
 
-// Sample selects a token from logits using temperature, top-p, or greedy sampling.
+// Sample selects a token from logits with temperature and top-p.
 func Sample(logits []float32, temp float64, topp float64, rng *rand.Rand) int32 {
 	if temp == 0 {
-		// Greedy sampling: return the token with the highest logit.
 		maxIdx := 0
 		maxVal := logits[0]
 		for i := 1; i < len(logits); i++ {
@@ -409,16 +440,14 @@ func Sample(logits []float32, temp float64, topp float64, rng *rand.Rand) int32 
 		return int32(maxIdx)
 	}
 
-	// Temperature scaling.
+	// Scale by temperature
 	for i := range logits {
 		logits[i] /= float32(temp)
 	}
-	// Compute softmax in-place to get probabilities.
-	Softmax(logits)
+	softmax(logits)
 
 	r := rng.Float32()
 
-	// If topp is not used, perform simple temperature sampling.
 	if topp <= 0 || topp >= 1 {
 		var cdf float32
 		for i, p := range logits {
@@ -427,11 +456,10 @@ func Sample(logits []float32, temp float64, topp float64, rng *rand.Rand) int32 
 				return int32(i)
 			}
 		}
-		return int32(len(logits) - 1) // Fallback.
+		return int32(len(logits) - 1)
 	}
 
-	// Top-p (nucleus) sampling.
-	// 1. Create and sort probabilities along with their original indices.
+	// Top-p sampling
 	probIndex := make([]ProbIndex, len(logits))
 	for i, p := range logits {
 		probIndex[i] = ProbIndex{Prob: p, Index: i}
@@ -440,19 +468,17 @@ func Sample(logits []float32, temp float64, topp float64, rng *rand.Rand) int32 
 		return probIndex[i].Prob > probIndex[j].Prob
 	})
 
-	// 2. Find the nucleus: the smallest set of tokens whose cumulative probability exceeds topp.
 	var cumProb float32
-	lastIdx := 0
+	lastIdx := len(probIndex) - 1
 	for i, pi := range probIndex {
 		cumProb += pi.Prob
 		if cumProb > float32(topp) {
 			lastIdx = i
-			break // The nucleus is probIndex[:lastIdx+1]
+			break
 		}
 	}
 
-	// 3. Sample from the nucleus.
-	r = r * cumProb // Rescale random number to the range [0, cumProb).
+	r *= cumProb
 	var cdf float32
 	for i := 0; i <= lastIdx; i++ {
 		cdf += probIndex[i].Prob
@@ -460,6 +486,5 @@ func Sample(logits []float32, temp float64, topp float64, rng *rand.Rand) int32 
 			return int32(probIndex[i].Index)
 		}
 	}
-
-	return int32(probIndex[lastIdx].Index) // Fallback for rounding errors.
+	return int32(probIndex[lastIdx].Index)
 }
