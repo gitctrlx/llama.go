@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"math/rand"
@@ -8,19 +9,26 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/fatih/color"
-	"github.com/qntx/llama.go"
-	"github.com/spf13/cobra"
+	"github.com/gocnn/llama.go"
 )
 
 // --- UI Color Scheme ---
 // We define our color scheme once, globally.
+type noopColor struct{}
+
+func newNoopColor() *noopColor { return &noopColor{} }
+
+func (c *noopColor) Print(a ...interface{})                 { fmt.Print(a...) }
+func (c *noopColor) Printf(format string, a ...interface{}) { fmt.Printf(format, a...) }
+func (c *noopColor) Println(a ...interface{})               { fmt.Println(a...) }
+func (c *noopColor) Sprint(a ...interface{}) string         { return fmt.Sprint(a...) }
+
 var (
-	titleColor    = color.New(color.FgCyan, color.Bold)
-	promptColor   = color.New(color.FgYellow)
-	generateColor = color.New(color.FgGreen)
-	infoColor     = color.New(color.FgWhite, color.Faint)
-	errorColor    = color.New(color.FgRed, color.Bold)
+	titleColor    = newNoopColor()
+	promptColor   = newNoopColor()
+	generateColor = newNoopColor()
+	infoColor     = newNoopColor()
+	errorColor    = newNoopColor()
 )
 
 // AppConfig holds all configuration parameters from the command line.
@@ -48,25 +56,35 @@ type Runner struct {
 func main() {
 	var cfg AppConfig
 
-	rootCmd := &cobra.Command{
-		Use:   "llama <checkpoint>",
-		Short: "Run a llama model with an elegant CLI interface",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg.CheckpointPath = args[0]
-			return execute(&cfg)
-		},
+	// Define flags using the standard library.
+	tokenizer := flag.String("tokenizer", "./tokenizer.bin", "Path to tokenizer file")
+	temperature := flag.Float64("temperature", 0.9, "Sampling temperature (0 for greedy)")
+	topp := flag.Float64("topp", 0.9, "Top-p (nucleus) sampling threshold")
+	steps := flag.Int("steps", 256, "Max generation steps")
+	prompt := flag.String("prompt", "Once upon a time", "Input prompt")
+	seed := flag.Int64("seed", time.Now().UnixNano(), "RNG seed")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <checkpoint>\n", filepath.Base(os.Args[0]))
+		flag.PrintDefaults()
 	}
+	flag.Parse()
 
-	// Bind command-line flags to the AppConfig struct.
-	rootCmd.Flags().StringVarP(&cfg.TokenizerPath, "tokenizer", "z", "./tokenizer.bin", "Path to tokenizer file")
-	rootCmd.Flags().Float64VarP(&cfg.Temperature, "temperature", "t", 0.9, "Sampling temperature (0 for greedy)")
-	rootCmd.Flags().Float64VarP(&cfg.Topp, "topp", "p", 0.9, "Top-p (nucleus) sampling threshold")
-	rootCmd.Flags().Int32VarP(&cfg.Steps, "steps", "n", 256, "Max generation steps")
-	rootCmd.Flags().StringVarP(&cfg.Prompt, "prompt", "i", "Once upon a time", "Input prompt")
-	rootCmd.Flags().Int64VarP(&cfg.Seed, "seed", "s", time.Now().UnixNano(), "RNG seed")
+	// Expect exactly one positional argument: the checkpoint path.
+	args := flag.Args()
+	if len(args) != 1 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	cfg.CheckpointPath = args[0]
+	cfg.TokenizerPath = *tokenizer
+	cfg.Temperature = *temperature
+	cfg.Topp = *topp
+	cfg.Steps = int32(*steps)
+	cfg.Prompt = *prompt
+	cfg.Seed = *seed
 
-	if err := rootCmd.Execute(); err != nil {
+	if err := execute(&cfg); err != nil {
 		// Using our error color for fatal logs.
 		log.Fatalf("%s %v", errorColor.Sprint("Error:"), err)
 	}
@@ -75,7 +93,7 @@ func main() {
 // execute orchestrates the main program flow and UI.
 func execute(cfg *AppConfig) error {
 	// --- Header ---
-	titleColor.Println("🚀 Llama.go")
+	titleColor.Println("Llama.go")
 	infoColor.Println("-----------------")
 
 	// 1. Set up and load the model.
@@ -99,7 +117,7 @@ func execute(cfg *AppConfig) error {
 
 // setup handles all initialization and setup tasks, now with styled output.
 func setup(cfg *AppConfig) (*Runner, error) {
-	infoColor.Print("⏳ Initializing model...")
+	infoColor.Print("Initializing model...")
 
 	config, weights, err := llama.LoadCheckpoint(cfg.CheckpointPath)
 	if err != nil {
@@ -127,7 +145,7 @@ func setup(cfg *AppConfig) (*Runner, error) {
 	}
 
 	// Use \r to move the cursor to the beginning of the line and overwrite the loading message.
-	infoColor.Println("\r✅ Model loaded successfully.  ")
+	infoColor.Println("\rModel loaded successfully.  ")
 	return runner, nil
 }
 
@@ -198,7 +216,7 @@ func run(r *Runner, cfg *AppConfig) error {
 		elapsed := time.Since(start)
 		if elapsed.Seconds() > 0 {
 			tokPerSec := float64(generatedSteps) / elapsed.Seconds()
-			infoColor.Printf("\n-----------------\n🚀 Achieved %.2f tokens/sec\n", tokPerSec)
+			infoColor.Printf("\n-----------------\nAchieved %.2f tokens/sec\n", tokPerSec)
 		}
 	} else {
 		fmt.Println() // Ensure a newline at the end.

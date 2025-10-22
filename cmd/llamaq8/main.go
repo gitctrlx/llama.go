@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"math/rand"
@@ -8,18 +9,25 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/fatih/color"
-	"github.com/qntx/llama.go"
-	"github.com/spf13/cobra"
+	"github.com/gocnn/llama.go"
 )
 
 // --- UI Color Scheme ---
+type noopColor struct{}
+
+func newNoopColor() *noopColor { return &noopColor{} }
+
+func (c *noopColor) Print(a ...interface{})                 { fmt.Print(a...) }
+func (c *noopColor) Printf(format string, a ...interface{}) { fmt.Printf(format, a...) }
+func (c *noopColor) Println(a ...interface{})               { fmt.Println(a...) }
+func (c *noopColor) Sprint(a ...interface{}) string         { return fmt.Sprint(a...) }
+
 var (
-	titleColor    = color.New(color.FgCyan, color.Bold)
-	promptColor   = color.New(color.FgYellow)
-	generateColor = color.New(color.FgGreen)
-	infoColor     = color.New(color.FgWhite, color.Faint)
-	errorColor    = color.New(color.FgRed, color.Bold)
+	titleColor    = newNoopColor()
+	promptColor   = newNoopColor()
+	generateColor = newNoopColor()
+	infoColor     = newNoopColor()
+	errorColor    = newNoopColor()
 )
 
 // AppConfig holds all configuration parameters from the command line.
@@ -49,32 +57,41 @@ type QuantizedRunner struct {
 func main() {
 	var cfg AppConfig
 
-	rootCmd := &cobra.Command{
-		Use:   "llamaq8 <quantized_checkpoint>",
-		Short: "Run a Q8 quantized Llama model with an elegant CLI interface",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg.CheckpointPath = args[0]
-			return executeQ8(&cfg)
-		},
+	// Define flags using the standard library.
+	tokenizer := flag.String("tokenizer", "./tokenizer.bin", "Path to tokenizer file")
+	temperature := flag.Float64("temperature", 0.9, "Sampling temperature (0 for greedy)")
+	topp := flag.Float64("topp", 0.9, "Top-p (nucleus) sampling threshold")
+	steps := flag.Int("steps", 256, "Max generation steps")
+	prompt := flag.String("prompt", "Once upon a time", "Input prompt")
+	seed := flag.Int64("seed", time.Now().UnixNano(), "RNG seed")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <quantized_checkpoint>\n", filepath.Base(os.Args[0]))
+		flag.PrintDefaults()
 	}
+	flag.Parse()
 
-	// Bind command-line flags to the AppConfig struct.
-	rootCmd.Flags().StringVarP(&cfg.TokenizerPath, "tokenizer", "z", "./tokenizer.bin", "Path to tokenizer file")
-	rootCmd.Flags().Float64VarP(&cfg.Temperature, "temperature", "t", 0.9, "Sampling temperature (0 for greedy)")
-	rootCmd.Flags().Float64VarP(&cfg.Topp, "topp", "p", 0.9, "Top-p (nucleus) sampling threshold")
-	rootCmd.Flags().Int32VarP(&cfg.Steps, "steps", "n", 256, "Max generation steps")
-	rootCmd.Flags().StringVarP(&cfg.Prompt, "prompt", "i", "Once upon a time", "Input prompt")
-	rootCmd.Flags().Int64VarP(&cfg.Seed, "seed", "s", time.Now().UnixNano(), "RNG seed")
+	args := flag.Args()
+	if len(args) != 1 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	cfg.CheckpointPath = args[0]
+	cfg.TokenizerPath = *tokenizer
+	cfg.Temperature = *temperature
+	cfg.Topp = *topp
+	cfg.Steps = int32(*steps)
+	cfg.Prompt = *prompt
+	cfg.Seed = *seed
 
-	if err := rootCmd.Execute(); err != nil {
+	if err := executeQ8(&cfg); err != nil {
 		log.Fatalf("%s %v", errorColor.Sprint("Error:"), err)
 	}
 }
 
 // executeQ8 orchestrates the main program flow for a quantized model.
 func executeQ8(cfg *AppConfig) error {
-	titleColor.Println("🚀 Llama.go (Q8 Quantized)")
+	titleColor.Println("Llama.go (Q8 Quantized)")
 	infoColor.Println("-----------------")
 
 	runner, err := setupQ8(cfg)
@@ -97,7 +114,7 @@ func executeQ8(cfg *AppConfig) error {
 
 // setupQ8 handles initialization for a QUANTIZED model.
 func setupQ8(cfg *AppConfig) (*QuantizedRunner, error) {
-	infoColor.Print("⏳ Initializing quantized model...")
+	infoColor.Print("Initializing quantized model...")
 
 	// SYNC: Update the function call to receive the new `groupSize` return value.
 	config, weights, gs, err := llama.LoadQuantizedCheckpoint(cfg.CheckpointPath)
@@ -129,7 +146,7 @@ func setupQ8(cfg *AppConfig) (*QuantizedRunner, error) {
 		groupSize: gs,
 	}
 
-	infoColor.Println("\r✅ Quantized model loaded successfully.   ")
+	infoColor.Println("\rQuantized model loaded successfully.   ")
 	return runner, nil
 }
 
@@ -191,7 +208,7 @@ func runQ8(r *QuantizedRunner, cfg *AppConfig) error {
 		elapsed := time.Since(start)
 		if elapsed.Seconds() > 0 {
 			tokPerSec := float64(generatedSteps) / elapsed.Seconds()
-			infoColor.Printf("\n-----------------\n🚀 Achieved %.2f tokens/sec\n", tokPerSec)
+			infoColor.Printf("\n-----------------\nAchieved %.2f tokens/sec\n", tokPerSec)
 		}
 	} else {
 		fmt.Println()
