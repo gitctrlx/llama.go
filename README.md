@@ -24,7 +24,7 @@ The examples use small models trained by [Andrej Karpathy](https://github.com/ka
 
 If you're interested in LLaMA implementations in other languages:
 
-- **[llama.go](https://github.com/gitctrlx/llama.go)** – Pure Go implementation
+- **[llama.np](https://github.com/gitctrlx/llama.np)** – NumPy-based implementation
 - **[llama.cu](https://github.com/gitctrlx/llama.cu)** – CUDA-accelerated implementation
 
 ## Acknowledgments
