@@ -20,6 +20,13 @@ go run cmd/llama/main.go ./cmd/llama/stories15M.bin
 
 The examples use small models trained by [Andrej Karpathy](https://github.com/karpathy/llama2.c?tab=readme-ov-file#models) for demonstration.
 
+## Related Work
+
+If you're interested in LLaMA implementations in other languages:
+
+- **[llama.go](https://github.com/gitctrlx/llama.go)** – Pure Go implementation
+- **[llama.cu](https://github.com/gitctrlx/llama.cu)** – CUDA-accelerated implementation
+
 ## Acknowledgments
 
 Inspired by [llama2.c](https://github.com/karpathy/llama2.c) and [go-llama2](https://github.com/tmc/go-llama2). Licensed under their respective terms.
